@@ -47,11 +47,39 @@ func setupTestRethEngine(t *testing.T) {
 	jwtSecretPath, err := filepath.Abs(DOCKER_JWTSECRET_PATH)
 	require.NoError(t, err)
 
-	err = os.WriteFile(DOCKER_JWTSECRET_PATH+DOCKER_JWT_SECRET_FILE, []byte(JWT_SECRET), 0644)
+	jwtFile := DOCKER_JWTSECRET_PATH + DOCKER_JWT_SECRET_FILE
+	err = os.WriteFile(jwtFile, []byte(JWT_SECRET), 0644)
 	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		err = os.Remove(jwtFile)
+		require.NoError(t, err)
+	})
 
 	cli, err := client.NewClientWithOpts()
 	require.NoError(t, err)
+
+	// waits until the container reaches the state. Otherwise, halts the test after the timeout
+	waitFunc := func(id, status string) {
+		// a reasonable time to wait for the container!
+		// wait atmost maxSteps * interval milliseconds
+		maxSteps := 4
+		interval := 50 // in milliseconds
+		for step := 1; step <= maxSteps; step++ {
+			time.Sleep(time.Duration(interval) * time.Millisecond)
+			rethInfo, err := cli.ContainerInspect(context.Background(), id)
+			if client.IsErrNotFound(err) && status == "removed" {
+				break
+			}
+			require.NoError(t, err) // failed to cleanup test env
+
+			if rethInfo.State.Status == status {
+				break
+			}
+
+			require.NotEqual(t, step, maxSteps, "failed to run reth container")
+		}
+	}
 
 	rethContainer, err := cli.ContainerCreate(context.Background(),
 		&container.Config{
@@ -101,21 +129,23 @@ func setupTestRethEngine(t *testing.T) {
 		},
 		nil, nil, "reth")
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		err = cli.ContainerRemove(context.Background(), rethContainer.ID, container.RemoveOptions{})
+		require.NoError(t, err)
+
+		waitFunc(rethContainer.ID, "removed")
+	})
 
 	err = cli.ContainerStart(context.Background(), rethContainer.ID, container.StartOptions{})
 	require.NoError(t, err)
 
-	// a reasonable time to wait for the container to start!
-	// do we want a more predictable elaborate code to wait for the container to be running?
-	time.Sleep(50 * time.Millisecond)
+	waitFunc(rethContainer.ID, "running")
 
 	t.Cleanup(func() {
 		err = cli.ContainerStop(context.Background(), rethContainer.ID, container.StopOptions{})
 		require.NoError(t, err)
-		err = cli.ContainerRemove(context.Background(), rethContainer.ID, container.RemoveOptions{})
-		require.NoError(t, err)
-		err = os.Remove(DOCKER_JWTSECRET_PATH + DOCKER_JWT_SECRET_FILE)
-		require.NoError(t, err)
+
+		waitFunc(rethContainer.ID, "exited")
 	})
 }
 
@@ -202,6 +232,11 @@ func TestExecutionClientLifecycle(t *testing.T) {
 		require.NoError(t, err)
 		assert.Greater(t, gasLimit, gasUsed)
 		assert.Equal(t, rollkit_types.Hash(newStateroot[:]), stateroot)
+	})
+
+	t.Run("SetFinal", func(t *testing.T) {
+		err := executionClient.SetFinal(context.Background(), blockHeight)
+		require.NoError(t, err)
 	})
 }
 
