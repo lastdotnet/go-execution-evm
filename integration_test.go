@@ -172,13 +172,13 @@ func TestExecutionClientLifecycle(t *testing.T) {
 	require.NoError(t, err)
 
 	// sub tests are only functional grouping.
-	t.Run("InitChain", func(t *testing.T) {
+	require.True(t, t.Run("InitChain", func(t *testing.T) {
 		stateRoot, gasLimit, err := executionClient.InitChain(context.Background(), genesisTime, initialHeight, CHAIN_ID)
 		require.NoError(t, err)
 
 		require.Equal(t, rollkitGenesisStateRoot, stateRoot)
 		require.Equal(t, uint64(1000000), gasLimit)
-	})
+	}))
 
 	privateKey, err := crypto.HexToECDSA(TEST_PRIVATE_KEY)
 	require.NoError(t, err)
@@ -200,7 +200,7 @@ func TestExecutionClientLifecycle(t *testing.T) {
 	err = rpcClient.SendTransaction(context.Background(), signedTx)
 	require.NoError(t, err)
 
-	t.Run("GetTxs", func(t *testing.T) {
+	require.True(t, t.Run("GetTxs", func(t *testing.T) {
 		txs, err := executionClient.GetTxs(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, 1, len(txs))
@@ -217,7 +217,7 @@ func TestExecutionClientLifecycle(t *testing.T) {
 		assert.Equal(t, rSignedTx, r)
 		assert.Equal(t, sSignedTx, s)
 		assert.Equal(t, vSignedTx, v)
-	})
+	}))
 
 	txBytes, err := signedTx.MarshalBinary()
 	require.NoError(t, err)
@@ -225,19 +225,19 @@ func TestExecutionClientLifecycle(t *testing.T) {
 	blockHeight := uint64(1)
 	blockTime := genesisTime.Add(10 * time.Second)
 
-	t.Run("ExecuteTxs", func(t *testing.T) {
+	require.True(t, t.Run("ExecuteTxs", func(t *testing.T) {
 		newStateroot := common.HexToHash("0x362b7d8a31e7671b0f357756221ac385790c25a27ab222dc8cbdd08944f5aea4")
 
 		stateroot, gasUsed, err := executionClient.ExecuteTxs(context.Background(), []rollkit_types.Tx{rollkit_types.Tx(txBytes)}, blockHeight, blockTime, rollkitGenesisStateRoot)
 		require.NoError(t, err)
 		assert.Greater(t, gasLimit, gasUsed)
 		assert.Equal(t, rollkit_types.Hash(newStateroot[:]), stateroot)
-	})
+	}))
 
-	t.Run("SetFinal", func(t *testing.T) {
+	require.True(t, t.Run("SetFinal", func(t *testing.T) {
 		err := executionClient.SetFinal(context.Background(), blockHeight)
 		require.NoError(t, err)
-	})
+	}))
 }
 
 func TestExecutionClient_InitChain_InvalidPayloadTimestamp(t *testing.T) {
