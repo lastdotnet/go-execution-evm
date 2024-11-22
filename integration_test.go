@@ -2,7 +2,6 @@ package execution
 
 import (
 	"context"
-	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -60,49 +59,6 @@ func setupTestRethEngine(t *testing.T) {
 	cli, err := client.NewClientWithOpts()
 	require.NoError(t, err)
 
-	// waits until the container reaches the state. Otherwise, halts the test after the timeout
-	waitFunc := func(id, status string) {
-		// a reasonable time to wait for the container!
-		// wait atmost maxRetries * interval milliseconds
-		maxRetries := 4
-		interval := 50 // in milliseconds
-		// terminate iteration when container reaches desired state or when max retires reached
-		for try := 1; try <= maxRetries; try++ {
-			time.Sleep(time.Duration(interval) * time.Millisecond)
-			rethInfo, err := cli.ContainerInspect(context.Background(), id)
-			if client.IsErrNotFound(err) && status == "removed" {
-				t.Log("reth in state " + status)
-				break
-			}
-			// retry on error
-			// require.NoError(t, err) // failed to cleanup test env!
-
-			t.Log("reth in state " + status)
-			if rethInfo.State.Status == status {
-				break
-			}
-
-			// best effort to wait failed!
-			require.NotEqual(t, try, maxRetries, "reth container failed to reach state "+status)
-		}
-	}
-
-	authToken, err := getAuthToken(TEST_JWT_SECRET)
-	require.NoError(t, err)
-
-	rethHealthCheck := fmt.Sprintf(`curl --location 'http://localhost:8551/' \
-	--header 'Content-Type: text/plain' \
-	--header 'Content-Type: application/json' \
-	--header 'Authorization: Bearer %s' \
-	--data '{
-		"jsonrpc":"2.0",
-		"id":1,
-		"method":"engine_getClientVersionV1",
-		"params":[
-			{"code":"RH","name":"rollkit","version":"v0.0.1","commit":"1403e279"}
-		]
-	}'`, authToken)
-
 	rethContainer, err := cli.ContainerCreate(context.Background(),
 		&container.Config{
 			Image:      "ghcr.io/paradigmxyz/reth:v1.1.1",
@@ -127,13 +83,6 @@ func setupTestRethEngine(t *testing.T) {
 			ExposedPorts: map[nat.Port]struct{}{
 				nat.Port("8545/tcp"): {},
 				nat.Port("8551/tcp"): {},
-			},
-			Healthcheck: &container.HealthConfig{
-				Test:        []string{"CMD-SHELL", rethHealthCheck + " || exit 1"},
-				StartPeriod: 50 * time.Millisecond,
-				Interval:    50 * time.Millisecond,
-				Timeout:     50 * time.Millisecond,
-				Retries:     3,
 			},
 		},
 		&container.HostConfig{
@@ -161,23 +110,23 @@ func setupTestRethEngine(t *testing.T) {
 	t.Cleanup(func() {
 		err = cli.ContainerRemove(context.Background(), rethContainer.ID, container.RemoveOptions{})
 		require.NoError(t, err)
-
-		waitFunc(rethContainer.ID, "removed")
 	})
 
 	err = cli.ContainerStart(context.Background(), rethContainer.ID, container.StartOptions{})
 	require.NoError(t, err)
 
-	waitFunc(rethContainer.ID, "running")
+	// a reasonable time to wait for the container to start!
+	// do we want a more predictable elaborate code to wait for the container to be running?
+	time.Sleep(100 * time.Millisecond)
 
 	t.Cleanup(func() {
 		err = cli.ContainerStop(context.Background(), rethContainer.ID, container.StopOptions{})
 		require.NoError(t, err)
-
-		waitFunc(rethContainer.ID, "exited")
 	})
 }
 
+// all integration test are subtests to optimize test time 
+// test setup and teardown are run only once
 func TestExecutionClientLifecycle(t *testing.T) {
 	setupTestRethEngine(t)
 
@@ -267,27 +216,25 @@ func TestExecutionClientLifecycle(t *testing.T) {
 		err := executionClient.SetFinal(context.Background(), blockHeight)
 		require.NoError(t, err)
 	}))
-}
 
-func TestExecutionClient_InitChain_InvalidPayloadTimestamp(t *testing.T) {
-	setupTestRethEngine(t)
+	require.True(t, t.Run("InitChain/InvalidPayloadTimestamp", func(t *testing.T) {
+		initialHeight := uint64(0)
+		genesisHash := common.HexToHash(TEST_CHAIN_GENESIS_HASH)
+		blockTime := time.Date(2024, 3, 13, 13, 54, 0, 0, time.UTC) // pre-cancun timestamp not supported
 
-	initialHeight := uint64(0)
-	genesisHash := common.HexToHash(TEST_CHAIN_GENESIS_HASH)
-	blockTime := time.Date(2024, 3, 13, 13, 54, 0, 0, time.UTC) // pre-cancun timestamp not supported
+		executionClient, err := NewEngineAPIExecutionClient(
+			&proxy_json_rpc.Config{},
+			TEST_ETH_URL,
+			TEST_ENGINE_URL,
+			TEST_JWT_SECRET,
+			genesisHash,
+			common.Address{},
+		)
+		require.NoError(t, err)
 
-	executionClient, err := NewEngineAPIExecutionClient(
-		&proxy_json_rpc.Config{},
-		TEST_ETH_URL,
-		TEST_ENGINE_URL,
-		TEST_JWT_SECRET,
-		genesisHash,
-		common.Address{},
-	)
-	require.NoError(t, err)
-
-	_, _, err = executionClient.InitChain(context.Background(), blockTime, initialHeight, TEST_CHAIN_ID)
-	// payload timestamp is not within the cancun timestamp
-	require.Error(t, err)
-	require.ErrorContains(t, err, "Unsupported fork")
+		_, _, err = executionClient.InitChain(context.Background(), blockTime, initialHeight, TEST_CHAIN_ID)
+		// payload timestamp is not within the cancun timestamp
+		require.Error(t, err)
+		require.ErrorContains(t, err, "Unsupported fork")
+	}))
 }
