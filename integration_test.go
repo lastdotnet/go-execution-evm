@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -25,30 +26,30 @@ import (
 const (
 	TEST_ETH_URL    = "http://localhost:8545"
 	TEST_ENGINE_URL = "http://localhost:8551"
-	JWT_SECRET      = "09a23c010d96caaebb21c193b85d30bbb62a9bac5bd0a684e9e91c77c811ca65"
+	TEST_JWT_SECRET = "09a23c010d96caaebb21c193b85d30bbb62a9bac5bd0a684e9e91c77c811ca65"
 
-	CHAIN_ID          = "1234"
-	GENESIS_HASH      = "0x8bf225d50da44f60dee1c4ee6f810fe5b44723c76ac765654b6692d50459f216"
-	GENESIS_STATEROOT = "0x362b7d8a31e7671b0f357756221ac385790c25a27ab222dc8cbdd08944f5aea4"
-	TEST_PRIVATE_KEY  = "cece4f25ac74deb1468965160c7185e07dff413f23fcadb611b05ca37ab0a52e"
-	TEST_TO_ADDRESS   = "0x944fDcD1c868E3cC566C78023CcB38A32cDA836E"
+	TEST_CHAIN_ID                = "1234"
+	TEST_CHAIN_GENESIS_HASH      = "0x8bf225d50da44f60dee1c4ee6f810fe5b44723c76ac765654b6692d50459f216"
+	TEST_CHAIN_GENESIS_STATEROOT = "0x362b7d8a31e7671b0f357756221ac385790c25a27ab222dc8cbdd08944f5aea4"
+	TEST_PRIVATE_KEY             = "cece4f25ac74deb1468965160c7185e07dff413f23fcadb611b05ca37ab0a52e"
+	TEST_TO_ADDRESS              = "0x944fDcD1c868E3cC566C78023CcB38A32cDA836E"
 
-	DOCKER_CHAIN_PATH      = "./docker/chain"     // path relative to the test file
-	DOCKER_JWTSECRET_PATH  = "./docker/jwttoken/" // path relative to the test file
-	DOCKER_JWT_SECRET_FILE = "testsecret.hex"
+	TEST_DOCKER_CHAIN_PATH     = "./docker/chain"     // path relative to the test file
+	TEST_DOCKER_JWTSECRET_PATH = "./docker/jwttoken/" // path relative to the test file
+	TEST_DOCKER_JWTSECRET_FILE = "testsecret.hex"
 )
 
 func setupTestRethEngine(t *testing.T) {
 	t.Helper()
 
-	chainPath, err := filepath.Abs(DOCKER_CHAIN_PATH)
+	chainPath, err := filepath.Abs(TEST_DOCKER_CHAIN_PATH)
 	require.NoError(t, err)
 
-	jwtSecretPath, err := filepath.Abs(DOCKER_JWTSECRET_PATH)
+	jwtSecretPath, err := filepath.Abs(TEST_DOCKER_JWTSECRET_PATH)
 	require.NoError(t, err)
 
-	jwtFile := DOCKER_JWTSECRET_PATH + DOCKER_JWT_SECRET_FILE
-	err = os.WriteFile(jwtFile, []byte(JWT_SECRET), 0644)
+	jwtFile := TEST_DOCKER_JWTSECRET_PATH + TEST_DOCKER_JWTSECRET_FILE
+	err = os.WriteFile(jwtFile, []byte(TEST_JWT_SECRET), 0644)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -62,24 +63,45 @@ func setupTestRethEngine(t *testing.T) {
 	// waits until the container reaches the state. Otherwise, halts the test after the timeout
 	waitFunc := func(id, status string) {
 		// a reasonable time to wait for the container!
-		// wait atmost maxSteps * interval milliseconds
-		maxSteps := 4
+		// wait atmost maxRetries * interval milliseconds
+		maxRetries := 4
 		interval := 50 // in milliseconds
-		for step := 1; step <= maxSteps; step++ {
+		// terminate iteration when container reaches desired state or when max retires reached
+		for try := 1; try <= maxRetries; try++ {
 			time.Sleep(time.Duration(interval) * time.Millisecond)
 			rethInfo, err := cli.ContainerInspect(context.Background(), id)
 			if client.IsErrNotFound(err) && status == "removed" {
+				t.Log("reth in state " + status)
 				break
 			}
-			require.NoError(t, err) // failed to cleanup test env
+			// retry on error
+			// require.NoError(t, err) // failed to cleanup test env!
 
+			t.Log("reth in state " + status)
 			if rethInfo.State.Status == status {
 				break
 			}
 
-			require.NotEqual(t, step, maxSteps, "failed to run reth container")
+			// best effort to wait failed!
+			require.NotEqual(t, try, maxRetries, "reth container failed to reach state "+status)
 		}
 	}
+
+	authToken, err := getAuthToken(TEST_JWT_SECRET)
+	require.NoError(t, err)
+
+	rethHealthCheck := fmt.Sprintf(`curl --location 'http://localhost:8551/' \
+	--header 'Content-Type: text/plain' \
+	--header 'Content-Type: application/json' \
+	--header 'Authorization: Bearer %s' \
+	--data '{
+		"jsonrpc":"2.0",
+		"id":1,
+		"method":"engine_getClientVersionV1",
+		"params":[
+			{"code":"RH","name":"rollkit","version":"v0.0.1","commit":"1403e279"}
+		]
+	}'`, authToken)
 
 	rethContainer, err := cli.ContainerCreate(context.Background(),
 		&container.Config{
@@ -105,6 +127,13 @@ func setupTestRethEngine(t *testing.T) {
 			ExposedPorts: map[nat.Port]struct{}{
 				nat.Port("8545/tcp"): {},
 				nat.Port("8551/tcp"): {},
+			},
+			Healthcheck: &container.HealthConfig{
+				Test:        []string{"CMD-SHELL", rethHealthCheck + " || exit 1"},
+				StartPeriod: 50 * time.Millisecond,
+				Interval:    50 * time.Millisecond,
+				Timeout:     50 * time.Millisecond,
+				Retries:     3,
 			},
 		},
 		&container.HostConfig{
@@ -153,9 +182,9 @@ func TestExecutionClientLifecycle(t *testing.T) {
 	setupTestRethEngine(t)
 
 	initialHeight := uint64(0)
-	genesisHash := common.HexToHash(GENESIS_HASH)
+	genesisHash := common.HexToHash(TEST_CHAIN_GENESIS_HASH)
 	genesisTime := time.Now().UTC().Truncate(time.Second)
-	genesisStateroot := common.HexToHash(GENESIS_STATEROOT)
+	genesisStateroot := common.HexToHash(TEST_CHAIN_GENESIS_STATEROOT)
 	rollkitGenesisStateRoot := rollkit_types.Hash(genesisStateroot[:])
 
 	rpcClient, err := ethclient.Dial(TEST_ETH_URL)
@@ -165,7 +194,7 @@ func TestExecutionClientLifecycle(t *testing.T) {
 		&proxy_json_rpc.Config{},
 		TEST_ETH_URL,
 		TEST_ENGINE_URL,
-		JWT_SECRET,
+		TEST_JWT_SECRET,
 		genesisHash,
 		common.Address{},
 	)
@@ -173,7 +202,7 @@ func TestExecutionClientLifecycle(t *testing.T) {
 
 	// sub tests are only functional grouping.
 	require.True(t, t.Run("InitChain", func(t *testing.T) {
-		stateRoot, gasLimit, err := executionClient.InitChain(context.Background(), genesisTime, initialHeight, CHAIN_ID)
+		stateRoot, gasLimit, err := executionClient.InitChain(context.Background(), genesisTime, initialHeight, TEST_CHAIN_ID)
 		require.NoError(t, err)
 
 		require.Equal(t, rollkitGenesisStateRoot, stateRoot)
@@ -183,7 +212,7 @@ func TestExecutionClientLifecycle(t *testing.T) {
 	privateKey, err := crypto.HexToECDSA(TEST_PRIVATE_KEY)
 	require.NoError(t, err)
 
-	chainId, _ := new(big.Int).SetString(CHAIN_ID, 10)
+	chainId, _ := new(big.Int).SetString(TEST_CHAIN_ID, 10)
 	nonce := uint64(1)
 	txValue := big.NewInt(1000000000000000000)
 	gasLimit := uint64(21000)
@@ -244,20 +273,20 @@ func TestExecutionClient_InitChain_InvalidPayloadTimestamp(t *testing.T) {
 	setupTestRethEngine(t)
 
 	initialHeight := uint64(0)
-	genesisHash := common.HexToHash(GENESIS_HASH)
+	genesisHash := common.HexToHash(TEST_CHAIN_GENESIS_HASH)
 	blockTime := time.Date(2024, 3, 13, 13, 54, 0, 0, time.UTC) // pre-cancun timestamp not supported
 
 	executionClient, err := NewEngineAPIExecutionClient(
 		&proxy_json_rpc.Config{},
 		TEST_ETH_URL,
 		TEST_ENGINE_URL,
-		JWT_SECRET,
+		TEST_JWT_SECRET,
 		genesisHash,
 		common.Address{},
 	)
 	require.NoError(t, err)
 
-	_, _, err = executionClient.InitChain(context.Background(), blockTime, initialHeight, CHAIN_ID)
+	_, _, err = executionClient.InitChain(context.Background(), blockTime, initialHeight, TEST_CHAIN_ID)
 	// payload timestamp is not within the cancun timestamp
 	require.Error(t, err)
 	require.ErrorContains(t, err, "Unsupported fork")

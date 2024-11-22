@@ -56,23 +56,9 @@ func NewEngineAPIExecutionClient(
 		return nil, err
 	}
 
-	authToken := ""
-	if jwtSecret != "" {
-		secret, err := hex.DecodeString(jwtSecret)
-		if err != nil {
-			return nil, err
-		}
-
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-			"exp": time.Now().Add(time.Hour * 1).Unix(), // Expires in 1 hour
-			"iat": time.Now().Unix(),
-		})
-
-		// Sign the token with the decoded secret
-		authToken, err = token.SignedString(secret)
-		if err != nil {
-			return nil, err
-		}
+	authToken, err := getAuthToken(jwtSecret)
+	if err != nil {
+		return nil, err
 	}
 
 	engineClient, err := rpc.DialOptions(context.Background(), engineURL,
@@ -94,6 +80,28 @@ func NewEngineAPIExecutionClient(
 		genesisHash:  genesisHash,
 		feeRecipient: feeRecipient,
 	}, nil
+}
+
+func getAuthToken(jwtSecret string) (string, error) {
+	if jwtSecret != "" {
+		secret, err := hex.DecodeString(jwtSecret)
+		if err != nil {
+			return "", err
+		}
+
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+			"exp": time.Now().Add(time.Hour * 1).Unix(), // Expires in 1 hour
+			"iat": time.Now().Unix(),
+		})
+
+		// Sign the token with the decoded secret
+		authToken, err := token.SignedString(secret)
+		if err != nil {
+			return "", err
+		}
+		return authToken, nil
+	}
+	return "", nil
 }
 
 // Start starts the execution client
