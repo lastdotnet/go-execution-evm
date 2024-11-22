@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -59,6 +60,57 @@ func setupTestRethEngine(t *testing.T) {
 	cli, err := client.NewClientWithOpts()
 	require.NoError(t, err)
 
+	// waits until the container reaches the state. Otherwise, halts the test after the timeout
+	waitFunc := func(id, status string) {
+		// a reasonable time to wait for the container!
+		// wait atmost maxRetries * interval milliseconds
+		maxRetries := 4
+		interval := 50 // in milliseconds
+		// terminate iteration when container reaches desired state or when max retires reached
+		for try := 1; try <= maxRetries; try++ {
+			rethInfo, err := cli.ContainerInspect(context.Background(), id)
+			if client.IsErrNotFound(err) && status == "removed" {
+				t.Log("reth in state " + status)
+				break
+			}
+			// retry on error
+			// require.NoError(t, err) // failed to cleanup test env!
+
+			t.Log("reth in state " + rethInfo.State.Status)
+			if rethInfo.State.Status == status {
+				break
+			}
+			
+			t.Log("reth health in state " + rethInfo.State.Health.Status)
+			if rethInfo.State.Health.Status == status {
+				break
+			}
+
+			t.Log(rethInfo.State.Health.Log)
+
+			// best effort to wait failed!
+			require.NotEqual(t, try, maxRetries, "reth container failed to reach state "+status)
+			time.Sleep(time.Duration(interval) * time.Millisecond)
+		}
+	}
+
+	authToken, err := getAuthToken(TEST_JWT_SECRET)
+	require.NoError(t, err)
+
+	// do you need a docker image with curl?
+	rethHealthCheck := fmt.Sprintf(`curl --fail --location 'http://localhost:8551/' \
+	--header 'Content-Type: text/plain' \
+	--header 'Content-Type: application/json' \
+	--header 'Authorization: Bearer %s' \
+	--data '{
+		"jsonrpc":"2.0",
+		"id":1,
+		"method":"engine_getClientVersionV1",
+		"params":[
+			{"code":"RH","name":"rollkit","version":"v0.0.1","commit":"1403e279"}
+		]
+	}'`, authToken)
+
 	rethContainer, err := cli.ContainerCreate(context.Background(),
 		&container.Config{
 			Image:      "ghcr.io/paradigmxyz/reth:v1.1.1",
@@ -83,6 +135,13 @@ func setupTestRethEngine(t *testing.T) {
 			ExposedPorts: map[nat.Port]struct{}{
 				nat.Port("8545/tcp"): {},
 				nat.Port("8551/tcp"): {},
+			},
+			Healthcheck: &container.HealthConfig{
+				Test:        []string{"CMD-SHELL", rethHealthCheck + " || exit 1"},
+				StartPeriod: 50 * time.Millisecond,
+				Interval:    20 * time.Millisecond,
+				Timeout:     0 * time.Millisecond,
+				Retries:     1,
 			},
 		},
 		&container.HostConfig{
@@ -115,9 +174,10 @@ func setupTestRethEngine(t *testing.T) {
 	err = cli.ContainerStart(context.Background(), rethContainer.ID, container.StartOptions{})
 	require.NoError(t, err)
 
+	waitFunc(rethContainer.ID, "healthy")
 	// a reasonable time to wait for the container to start!
 	// do we want a more predictable elaborate code to wait for the container to be running?
-	time.Sleep(100 * time.Millisecond)
+	// time.Sleep(20 * time.Millisecond)
 
 	t.Cleanup(func() {
 		err = cli.ContainerStop(context.Background(), rethContainer.ID, container.StopOptions{})
@@ -125,7 +185,7 @@ func setupTestRethEngine(t *testing.T) {
 	})
 }
 
-// all integration test are subtests to optimize test time 
+// all integration test are subtests to optimize test time
 // test setup and teardown are run only once
 func TestExecutionClientLifecycle(t *testing.T) {
 	setupTestRethEngine(t)
